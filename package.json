@@ -1,0 +1,9 @@
+{
+  "name": "case-room",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Live AI case interview practice — self-hosted, bring-your-own Anthropic API key.",
+  "engines": {
+    "node": ">=18"
+  }
+}
