@@ -624,7 +624,7 @@
         prompt: result.prompt, source: 'ai-new', category: cat,
       };
     }catch(e){
-      setup.error = 'Case generation failed (' + (e && e.code ? e.code : 'error') + '). Try again.';
+      setup.error = 'Case generation failed: ' + (e && e.code ? e.code : 'error') + (e && e.message ? ' - ' + e.message : '') + '. Try again.';
     }
     setup.busy = false; render();
   }
@@ -642,7 +642,7 @@
         prompt: result.prompt, source: 'ai-remix', category: base.c, basedOn: base.t,
       };
     }catch(e){
-      setup.error = 'Remix failed (' + (e && e.code ? e.code : 'error') + '). Try again.';
+      setup.error = 'Remix failed: ' + (e && e.code ? e.code : 'error') + (e && e.message ? ' - ' + e.message : '') + '. Try again.';
     }
     setup.busy = false; render();
   }
@@ -750,7 +750,8 @@
       session.transcript.push({role:'interviewer', text: replyText, ts:Date.now()});
       speak(replyText);
     }catch(e){
-      session.transcript.push({role:'interviewer', text:"(Couldn't reach the interviewer model just now — try sending again.)", ts:Date.now()});
+      const detail = (e && (e.message || e.code)) ? ' [' + (e.code||'error') + ': ' + (e.message||'') + ']' : '';
+      session.transcript.push({role:'interviewer', text:"(Couldn't reach the interviewer model just now — try sending again." + detail + ")", ts:Date.now()});
     }
     session.busy = false;
     render();
@@ -858,7 +859,7 @@
       session.evaluation = Object.assign({}, result, {overallScore, overall: tierForScore(overallScore)});
       await saveAttempt();
     }catch(e){
-      session.evalError = 'Evaluation failed (' + (e && e.code ? e.code : 'error') + '). Your transcript is still below.';
+      session.evalError = 'Evaluation failed: ' + (e && e.code ? e.code : 'error') + (e && e.message ? ' - ' + e.message : '') + '. Your transcript is still below.';
     }
     session.evalBusy = false; render();
   }
