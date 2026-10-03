@@ -10,7 +10,12 @@
 //   - openrouter  OpenRouter's ":free" model pool (aggregates several labs)
 
 const MODELS = {
-  gemini: { quick: 'gemini-2.5-flash-lite', default: 'gemini-2.5-flash', complex: 'gemini-2.5-pro' },
+  // gemini-2.5-* was retired for new users; gemini-3.8-flash is the name
+  // Google's own API error confirmed as current. Unified across all three
+  // tiers for now rather than guessing at -lite/-pro variants that might
+  // also 404 — split these out once you've confirmed other names work by
+  // checking the model list in Google AI Studio for this account.
+  gemini: { quick: 'gemini-3.8-flash', default: 'gemini-3.8-flash', complex: 'gemini-3.8-flash' },
   groq: { quick: 'llama-3.1-8b-instant', default: 'llama-3.3-70b-versatile', complex: 'llama-3.3-70b-versatile' },
   openrouter: {
     quick: 'meta-llama/llama-3.2-3b-instruct:free',
