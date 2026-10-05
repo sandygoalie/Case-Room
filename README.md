@@ -6,8 +6,8 @@ claude.ai artifact version, this one:
 - Needs no Claude account, no sharing roles, no "contributor" access — anyone
   with the URL can open it.
 - Lets each person paste their **own** API key for a **free-tier** AI
-  provider (Google Gemini, Groq, or OpenRouter) — nothing runs on your
-  account or your bill.
+  provider — Google Gemini, Groq, OpenRouter, Cerebras, Mistral, or NVIDIA
+  NIM — nothing runs on your account or your bill.
 - Supports real **microphone dictation** (impossible inside a claude.ai
   artifact, which blocks mic access outright) — browsers can finally ask for
   mic permission properly here.
@@ -73,13 +73,20 @@ With this option, every future `git push` to `main` auto-redeploys.
 ## Using it
 
 1. Open the deployed URL.
-2. Pick a provider (Gemini / Groq / OpenRouter) and paste a free API key:
+2. Pick a provider and paste a free API key:
    - **Gemini**: aistudio.google.com/apikey — sign in with any Google
      account, generate a key, no card required.
    - **Groq**: console.groq.com/keys — free account, fast open-weight models.
    - **OpenRouter**: openrouter.ai/keys — gives access to several labs'
      `:free`-suffixed models through one key.
+   - **Cerebras**: cloud.cerebras.ai — free account, very fast inference.
+   - **Mistral**: console.mistral.ai/api-keys — free tier on La Plateforme.
+   - **NVIDIA NIM**: build.nvidia.com — free account, hosted open models.
 3. Pick a case (book / AI-generated / AI remix) and start the interview.
+
+If one provider is overloaded (the occasional "high demand, try again" error
+some free tiers return under load), switching providers in the dropdown is
+the fastest workaround — each one has entirely separate quota.
 
 Each person who opens the link pastes their **own** key, stored only in
 their own browser's `localStorage` — it's sent to this site's own `/api/chat`

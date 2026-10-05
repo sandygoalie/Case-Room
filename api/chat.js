@@ -4,17 +4,20 @@
 // body, used for exactly one outbound fetch, and discarded when the
 // function returns.
 //
-// Three providers, all with a real free tier (no card required to start):
+// Six providers, all with a real free tier (no card required to start):
 //   - gemini      Google AI Studio
 //   - groq        Groq Cloud (fast open-weight models)
 //   - openrouter  OpenRouter's ":free" model pool (aggregates several labs)
-
+//   - cerebras    Cerebras Cloud (very fast inference on open models)
+//   - mistral     Mistral's "La Plateforme" free tier
+//   - nvidia      NVIDIA NIM (build.nvidia.com) hosted open models
+//
+// Model names below are a best-effort pick as of this writing, not a live
+// lookup — free-tier lineups shift over time (this already bit the gemini
+// entry once: gemini-2.5-* was retired and replaced with gemini-3.8-flash).
+// If a provider starts 404ing on its model name, check that provider's own
+// current model list and update its entry here; nothing else needs to change.
 const MODELS = {
-  // gemini-2.5-* was retired for new users; gemini-3.8-flash is the name
-  // Google's own API error confirmed as current. Unified across all three
-  // tiers for now rather than guessing at -lite/-pro variants that might
-  // also 404 — split these out once you've confirmed other names work by
-  // checking the model list in Google AI Studio for this account.
   gemini: { quick: 'gemini-3.8-flash', default: 'gemini-3.8-flash', complex: 'gemini-3.8-flash' },
   groq: { quick: 'llama-3.1-8b-instant', default: 'llama-3.3-70b-versatile', complex: 'llama-3.3-70b-versatile' },
   openrouter: {
@@ -22,6 +25,19 @@ const MODELS = {
     default: 'meta-llama/llama-3.3-70b-instruct:free',
     complex: 'deepseek/deepseek-r1:free',
   },
+  cerebras: { quick: 'llama-3.3-70b', default: 'llama-3.3-70b', complex: 'llama-3.3-70b' },
+  mistral: { quick: 'open-mistral-nemo', default: 'mistral-small-latest', complex: 'mistral-small-latest' },
+  nvidia: { quick: 'meta/llama-3.1-8b-instruct', default: 'meta/llama-3.1-8b-instruct', complex: 'meta/llama-3.1-8b-instruct' },
+};
+
+// base URL for every provider that speaks the OpenAI chat-completions shape
+// (everyone except Gemini, which has its own call function below)
+const OPENAI_COMPATIBLE_BASE = {
+  groq: 'https://api.groq.com/openai/v1',
+  openrouter: 'https://openrouter.ai/api/v1',
+  cerebras: 'https://api.cerebras.ai/v1',
+  mistral: 'https://api.mistral.ai/v1',
+  nvidia: 'https://integrate.api.nvidia.com/v1',
 };
 
 async function callGemini(apiKey, model, system, messages, maxOutputTokens){
@@ -53,7 +69,7 @@ async function callGemini(apiKey, model, system, messages, maxOutputTokens){
   return { ok: true, text };
 }
 
-// Groq and OpenRouter both speak the OpenAI chat-completions shape.
+// Every provider except Gemini speaks the OpenAI chat-completions shape.
 async function callOpenAiCompatible(baseUrl, apiKey, model, system, messages, maxTokens, extraHeaders){
   const chatMessages = system ? [{ role: 'system', content: system }, ...messages] : messages;
   const upstream = await fetch(baseUrl + '/chat/completions', {
@@ -113,13 +129,9 @@ module.exports = async (req, res) => {
   try {
     if (prov === 'gemini') {
       result = await callGemini(apiKey, model, sys, messages, maxOut);
-    } else if (prov === 'groq') {
-      result = await callOpenAiCompatible('https://api.groq.com/openai/v1', apiKey, model, sys, messages, maxOut);
     } else {
-      result = await callOpenAiCompatible('https://openrouter.ai/api/v1', apiKey, model, sys, messages, maxOut, {
-        'HTTP-Referer': 'https://case-room.vercel.app',
-        'X-Title': 'Case Room',
-      });
+      const extraHeaders = prov === 'openrouter' ? { 'HTTP-Referer': 'https://case-room.vercel.app', 'X-Title': 'Case Room' } : undefined;
+      result = await callOpenAiCompatible(OPENAI_COMPATIBLE_BASE[prov], apiKey, model, sys, messages, maxOut, extraHeaders);
     }
   } catch (e) {
     res.status(502).json({ error: 'upstream_unreachable', message: 'Could not reach ' + prov + '.' });

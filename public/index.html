@@ -504,6 +504,9 @@
     {id:'gemini', name:'Google Gemini', placeholder:'AIzaSy...', keyUrl:'aistudio.google.com/apikey'},
     {id:'groq', name:'Groq', placeholder:'gsk_...', keyUrl:'console.groq.com/keys'},
     {id:'openrouter', name:'OpenRouter (free models)', placeholder:'sk-or-v1-...', keyUrl:'openrouter.ai/keys'},
+    {id:'cerebras', name:'Cerebras', placeholder:'csk-...', keyUrl:'cloud.cerebras.ai'},
+    {id:'mistral', name:'Mistral', placeholder:'...', keyUrl:'console.mistral.ai/api-keys'},
+    {id:'nvidia', name:'NVIDIA NIM', placeholder:'nvapi-...', keyUrl:'build.nvidia.com'},
   ];
   let aiProvider = 'gemini';
   try{ aiProvider = localStorage.getItem('caseroom_provider') || 'gemini'; }catch(e){}
