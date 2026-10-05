@@ -125,6 +125,10 @@
   .source-tab.active .st-name{ color:var(--accent); }
 
   .field-row{ display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+  .key-status-row{ margin-bottom:10px; }
+  .key-status{ display:inline-flex; align-items:center; gap:6px; font-family:"IBM Plex Mono"; font-size:0.76rem; font-weight:600; padding:5px 11px; border-radius:999px; }
+  .key-status-ok{ background:var(--good-bg); color:var(--good); }
+  .key-status-empty{ background:var(--surface-2); color:var(--muted); }
   .field{ flex:1 1 160px; min-width:0; }
   .field label{ display:block; font-family:"IBM Plex Mono"; font-size:0.64rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:5px; }
   select, input[type="text"], textarea{
@@ -244,8 +248,20 @@
   }
   .think-btn.active{ background:var(--warn-bg); border-color:var(--warn); color:var(--warn); }
   .think-btn .dot{ width:7px; height:7px; border-radius:50%; background:currentColor; }
+  .think-btn.calc-btn.active{ background:var(--accent-soft); border-color:var(--accent); color:var(--accent); }
+  .think-btn:disabled{ opacity:0.45; cursor:default; }
+  .pause-btn{
+    border:1px solid var(--line); background:var(--surface); color:var(--ink-soft); border-radius:8px;
+    padding:7px 14px; cursor:pointer; font-size:0.78rem; font-weight:700;
+  }
+  .pause-btn.active{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
+  .paused-banner{
+    background:var(--accent-soft); border:1px solid var(--accent); color:var(--accent); border-radius:9px;
+    padding:9px 14px; font-size:0.84rem; font-weight:600; margin-bottom:14px; text-align:center;
+  }
   .session-top-spacer{ flex:1; }
   .end-btn{ background:var(--bad-bg); color:var(--bad); border:1px solid var(--bad); border-radius:8px; padding:7px 13px; font-size:0.78rem; font-weight:700; cursor:pointer; }
+  .end-btn:disabled{ opacity:0.45; cursor:default; }
 
   .phase-row{ display:flex; gap:6px; margin-bottom:16px; flex-wrap:wrap; }
   .phase-pill{
@@ -358,6 +374,11 @@
     const m = Math.floor(total/60), s = total%60;
     return String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
   }
+  // wall-clock span minus any time on a break, so the saved "total time" always
+  // matches what the live Elapsed clock showed during the session
+  function workingMs(s){
+    return (s.endedAt - s.startedAt) - ((s.paused && s.paused.totalMs) || 0);
+  }
   function relDate(ts){
     const diff = Date.now() - ts;
     const day = 86400000;
@@ -444,7 +465,7 @@
   let session = null;
   let ttsEnabled = false;
   let speechSupported = (typeof window.speechSynthesis !== 'undefined');
-  let apiKeyVisible = false;
+  let apiKeyVisible = true; // visible by default — this is a self-hosted personal tool, not a shared public form; "Hide" is there for anyone who wants it
   const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
   let micSupported = !!SpeechRecognitionCtor;
   let micActive = false;
@@ -512,8 +533,15 @@
     try{ localStorage.setItem('caseroom_provider', id); }catch(e){}
   }
 
-  async function callClaudeRaw(messages, opts){
-    opts = opts || {};
+  function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+  // free-tier providers (Gemini especially) routinely return a transient
+  // "overloaded, try again" error under load — retry those automatically a
+  // couple of times with backoff before bothering the viewer with it
+  const TRANSIENT_CODES = new Set(['UNAVAILABLE','RESOURCE_EXHAUSTED','rate_limited','upstream_error','upstream_unreachable','network_error']);
+  function isTransient(code){ return TRANSIENT_CODES.has(String(code||'').toUpperCase()) || TRANSIENT_CODES.has(code); }
+
+  async function callClaudeOnce(messages, opts){
     if(!userApiKey) throw {code:'no_api_key', message:'Add your API key for ' + PROVIDERS.find(p=>p.id===aiProvider).name + ' first.'};
     let res;
     try{
@@ -528,6 +556,25 @@
       throw {code:(payload&&payload.error)||'upstream_error', message:(payload&&payload.message)||('Request failed ('+res.status+')')};
     }
     return payload.text;
+  }
+
+  async function callClaudeRaw(messages, opts){
+    opts = opts || {};
+    const maxAttempts = 3;
+    let lastErr;
+    for(let attempt = 1; attempt <= maxAttempts; attempt++){
+      try{
+        return await callClaudeOnce(messages, opts);
+      }catch(e){
+        lastErr = e;
+        if(attempt < maxAttempts && isTransient(e && e.code)){
+          await sleep(900 * attempt); // 0.9s, then 1.8s
+          continue;
+        }
+        throw e;
+      }
+    }
+    throw lastErr;
   }
 
   function parseJsonTolerant(text){
@@ -662,6 +709,8 @@
       phaseStart: Date.now(),
       phaseElapsed: [0,0,0,0],
       thinking: {active:false, startedAt:null, totalMs:0},
+      calc: {active:false, startedAt:null, totalMs:0},
+      paused: {active:false, startedAt:null, totalMs:0},
       busy: false,
       evaluation: null,
       evalBusy: false,
@@ -703,6 +752,36 @@
     render();
   }
 
+  function toggleCalc(){
+    if(!session || session.paused.active) return;
+    const c = session.calc;
+    if(c.active){
+      c.totalMs += Date.now() - c.startedAt;
+      c.active = false; c.startedAt = null;
+    } else {
+      c.active = true; c.startedAt = Date.now();
+    }
+    render();
+  }
+
+  // a break: freezes the elapsed clock and blocks interaction until resumed.
+  // any running Thinking/Calc stopwatch is folded in and stopped too, so a
+  // break never silently keeps counting toward either of them.
+  function togglePause(){
+    if(!session) return;
+    const p = session.paused;
+    if(p.active){
+      p.totalMs += Date.now() - p.startedAt;
+      p.active = false; p.startedAt = null;
+    } else {
+      const now = Date.now();
+      if(session.thinking.active){ session.thinking.totalMs += now - session.thinking.startedAt; session.thinking.active = false; session.thinking.startedAt = null; }
+      if(session.calc.active){ session.calc.totalMs += now - session.calc.startedAt; session.calc.active = false; session.calc.startedAt = null; }
+      p.active = true; p.startedAt = now;
+    }
+    render();
+  }
+
   function advancePhase(){
     if(!session || session.phase >= PHASES.length-1) return;
     const now = Date.now();
@@ -734,7 +813,7 @@
 
   async function sendCandidateMessage(text){
     text = text.trim();
-    if(!text || !session || session.busy) return;
+    if(!text || !session || session.busy || session.paused.active) return;
     if(micActive) stopMic();
     session.transcript.push({role:'candidate', text, ts:Date.now()});
     session.busy = true;
@@ -837,6 +916,8 @@
     const now = Date.now();
     session.phaseElapsed[session.phase] += now - session.phaseStart;
     if(session.thinking.active){ session.thinking.totalMs += now - session.thinking.startedAt; session.thinking.active = false; }
+    if(session.calc.active){ session.calc.totalMs += now - session.calc.startedAt; session.calc.active = false; }
+    if(session.paused.active){ session.paused.totalMs += now - session.paused.startedAt; session.paused.active = false; }
     session.endedAt = now;
     stopTicking();
     view = 'eval';
@@ -851,8 +932,8 @@
       session.evalBusy = false; render(); return;
     }
     const transcriptText = session.transcript.map(m => (m.role==='candidate'?'Candidate: ':'Interviewer: ') + m.text).join('\n');
-    const totalMs = session.endedAt - session.startedAt;
-    const prompt = `You are grading a completed case interview as a strict but fair MBB interviewer, after the fact.\n\nCASE: """${session.case.prompt}"""\nDIFFICULTY: ${session.difficulty}\n\nFULL TRANSCRIPT:\n${transcriptText}\n\nTIMING: total ${fmtTime(totalMs)}, thinking time ${fmtTime(session.thinking.totalMs)}.\n\nScore the candidate 0-10 (decimals allowed, e.g. 7.5) on each: Structure, Assumptions, Communication, Number Sense. Score against a real MBB bar, not a generous classroom curve — 8.5+ is a genuinely strong, close-to-ideal performance on that axis, not the default for a reasonable attempt.\n\nReturn ONLY JSON, no markdown, matching exactly: {"ratings":{"structure":0,"assumptions":0,"communication":0,"numberSense":0},"summary":"2-3 sentence overall take on this specific performance","strengths":["specific to this transcript",".."],"improvements":["specific to this transcript",".."]}\nGive 2-5 items each for strengths/improvements, grounded in what actually happened, not generic advice.`;
+    const totalMs = workingMs(session);
+    const prompt = `You are grading a completed case interview as a strict but fair MBB interviewer, after the fact.\n\nCASE: """${session.case.prompt}"""\nDIFFICULTY: ${session.difficulty}\n\nFULL TRANSCRIPT:\n${transcriptText}\n\nTIMING: total ${fmtTime(totalMs)}, thinking time ${fmtTime(session.thinking.totalMs)}, calculation time ${fmtTime(session.calc.totalMs)}.\n\nScore the candidate 0-10 (decimals allowed, e.g. 7.5) on each: Structure, Assumptions, Communication, Number Sense. Score against a real MBB bar, not a generous classroom curve — 8.5+ is a genuinely strong, close-to-ideal performance on that axis, not the default for a reasonable attempt.\n\nReturn ONLY JSON, no markdown, matching exactly: {"ratings":{"structure":0,"assumptions":0,"communication":0,"numberSense":0},"summary":"2-3 sentence overall take on this specific performance","strengths":["specific to this transcript",".."],"improvements":["specific to this transcript",".."]}\nGive 2-5 items each for strengths/improvements, grounded in what actually happened, not generic advice.`;
     try{
       const result = await sampleApi.json(prompt, {modelTier:'complex'});
       const overallScore = computeOverall(result.ratings);
@@ -873,8 +954,10 @@
       basedOn: session.case.basedOn || null,
       difficulty: session.difficulty,
       startedAt: session.startedAt, endedAt: session.endedAt,
-      totalMs: session.endedAt - session.startedAt,
+      totalMs: workingMs(session),
       thinkingMs: session.thinking.totalMs,
+      calcMs: session.calc.totalMs,
+      pausedMs: session.paused.totalMs,
       phaseElapsed: session.phaseElapsed,
       transcript: session.transcript,
       evaluation: session.evaluation,
@@ -957,13 +1040,22 @@
 
   function renderTimers(){
     if(!session) return;
+    const now = Date.now();
     const totalEl = app.querySelector('[data-timer="total"]');
     const thinkEl = app.querySelector('[data-timer="think"]');
-    if(totalEl) totalEl.textContent = fmtTime(Date.now() - session.startedAt);
+    const calcEl = app.querySelector('[data-timer="calc"]');
+    const p = session.paused;
+    const pausedMs = p.totalMs + (p.active ? now - p.startedAt : 0);
+    if(totalEl) totalEl.textContent = fmtTime(now - session.startedAt - pausedMs);
     if(thinkEl){
       const t = session.thinking;
-      const live = t.active ? (Date.now() - t.startedAt) : 0;
+      const live = t.active ? (now - t.startedAt) : 0;
       thinkEl.textContent = fmtTime(t.totalMs + live);
+    }
+    if(calcEl){
+      const c = session.calc;
+      const live = c.active ? (now - c.startedAt) : 0;
+      calcEl.textContent = fmtTime(c.totalMs + live);
     }
   }
 
@@ -981,21 +1073,22 @@
     // the input is always blank on render (never pre-filled with the saved key, masked
     // or not) — pre-filling a masked value is a trap: click Save without retyping and
     // you'd overwrite the real key with dots. "Clear" is the only way to remove one.
-    const statusLine = userApiKey
-      ? `✓ A ${esc(prov.name)} key is saved, ending in …${esc(userApiKey.slice(-4))}. Paste a new one and hit Save to replace it.`
-      : `No key saved yet. Free key at ${esc(prov.keyUrl)} — paste it below.`;
-    return `<div class="field-row">
+    const statusBadge = userApiKey
+      ? `<span class="key-status key-status-ok">✓ ${esc(prov.name)} key saved · ends in …${esc(userApiKey.slice(-4))}</span>`
+      : `<span class="key-status key-status-empty">No ${esc(prov.name)} key saved yet</span>`;
+    return `<div class="key-status-row">${statusBadge}</div>
+      <div class="field-row">
         <div class="field" style="flex:0 0 200px;">
           <select id="providerSelect">${providerOptions}</select>
         </div>
         <div class="field" style="flex:1 1 280px;">
           <input type="${apiKeyVisible?'text':'password'}" id="apiKeyInput" placeholder="${esc(prov.placeholder)}" autocomplete="off" spellcheck="false">
         </div>
-        <button type="button" class="btn btn-ghost" data-action="toggle-key-visible" style="flex:none;">${apiKeyVisible?'Hide':'Show'}</button>
+        <button type="button" class="btn btn-ghost" data-action="toggle-key-visible" style="flex:none;">${apiKeyVisible?'🙈 Hide':'👁 Show'}</button>
         <button type="button" class="btn btn-primary" data-action="save-key" style="flex:none;">Save</button>
         ${userApiKey ? `<button type="button" class="btn btn-ghost" data-action="clear-key" style="flex:none;">Clear</button>` : ''}
       </div>
-      <div class="note">${statusLine} It's sent directly to this app's own server on each request to call ${esc(prov.name)} on your behalf, and is never logged or stored anywhere except your browser's local storage. Each provider's key is kept separate — switching providers above won't lose the others.</div>`;
+      <div class="note">${userApiKey ? 'Paste a new key and hit Save to replace it.' : `Free key at ${esc(prov.keyUrl)} — paste it above.`} It's sent directly to this app's own server on each request to call ${esc(prov.name)} on your behalf, and is never logged or stored anywhere except your browser's local storage. Each provider's key is kept separate — switching providers above won't lose the others.</div>`;
   }
 
   function micNoteHtml(){
@@ -1228,7 +1321,7 @@
   }
 
   function buildProgressCsv(){
-    const headers = ['Date','Case Title','Source','Category','Difficulty','Overall Score','Structure','Assumptions','Communication','Number Sense','Total Time','Thinking Time'];
+    const headers = ['Date','Case Title','Source','Category','Difficulty','Overall Score','Structure','Assumptions','Communication','Number Sense','Total Time','Thinking Time','Calc Time'];
     const rows = history.slice().sort((a,b) => a.createdAt-b.createdAt).map(h => {
       const ev = h.evaluation || {}; const r = ev.ratings || {};
       return [
@@ -1236,7 +1329,7 @@
         ev.overallScore!=null?ev.overallScore.toFixed(1):'',
         r.structure!=null?r.structure:'', r.assumptions!=null?r.assumptions:'',
         r.communication!=null?r.communication:'', r.numberSense!=null?r.numberSense:'',
-        fmtTime(h.totalMs||0), fmtTime(h.thinkingMs||0),
+        fmtTime(h.totalMs||0), fmtTime(h.thinkingMs||0), fmtTime(h.calcMs||0),
       ];
     });
     return [headers, ...rows].map(row => row.map(csvCell).join(',')).join('\n');
@@ -1267,7 +1360,7 @@
     }
     lines.push(`## Timing`);
     lines.push('');
-    lines.push(`Total: ${fmtTime(h.totalMs||0)} · Thinking: ${fmtTime(h.thinkingMs||0)}`);
+    lines.push(`Total: ${fmtTime(h.totalMs||0)} · Thinking: ${fmtTime(h.thinkingMs||0)} · Calc: ${fmtTime(h.calcMs||0)}`);
     lines.push('');
     lines.push('## Full transcript');
     lines.push('');
@@ -1353,6 +1446,8 @@
 
   function sessionHtml(){
     const c = session.case;
+    const paused = session.paused.active;
+    const locked = paused || session.busy; // paused blocks interaction the same way busy does
     const transcriptBubbles = session.transcript.map(m => `<div class="bubble ${m.role}">
         <div class="b-role">${m.role==='candidate'?'You':'Interviewer'}</div>${esc(m.text)}
       </div>`).join('') + (session.busy ? `<div class="bubble-wait"><span class="spinner"></span> Interviewer is thinking…</div>` : '');
@@ -1361,28 +1456,34 @@
 
     return `<div class="session-top">
         <div class="timer-box"><span class="tb-label">Elapsed</span><span class="tb-value mono" data-timer="total">00:00</span></div>
-        <button type="button" class="think-btn ${session.thinking.active?'active':''}" data-action="toggle-think">
+        <button type="button" class="think-btn ${session.thinking.active?'active':''}" data-action="toggle-think" ${paused?'disabled':''}>
           <span class="dot"></span> Thinking: <span class="mono" data-timer="think">00:00</span>
         </button>
+        <button type="button" class="think-btn calc-btn ${session.calc.active?'active':''}" data-action="toggle-calc" ${paused?'disabled':''}>
+          <span class="dot"></span> Calc: <span class="mono" data-timer="calc">00:00</span>
+        </button>
+        <button type="button" class="pause-btn ${paused?'active':''}" data-action="toggle-pause">${paused?'▶ Resume':'⏸ Pause'}</button>
         <div class="session-top-spacer"></div>
-        <button type="button" class="end-btn" data-action="end-session">End &amp; get feedback</button>
+        <button type="button" class="end-btn" data-action="end-session" ${paused?'disabled':''}>End &amp; get feedback</button>
       </div>
+      ${paused ? `<div class="paused-banner">⏸ On a break — the clock is stopped. Hit Resume when you're back.</div>` : ''}
       <div class="phase-row">${phasePills}</div>
-      <div class="phase-next"><button type="button" class="btn btn-ghost" data-action="next-phase" ${session.phase>=PHASES.length-1?'disabled':''}>Next phase: ${esc(PHASES[Math.min(session.phase+1,PHASES.length-1)])} ›</button></div>
+      <div class="phase-next"><button type="button" class="btn btn-ghost" data-action="next-phase" ${(session.phase>=PHASES.length-1||paused)?'disabled':''}>Next phase: ${esc(PHASES[Math.min(session.phase+1,PHASES.length-1)])} ›</button></div>
       <div class="case-card">
         <div class="cc-meta">${esc(c.firm)} · ${esc(c.sector)} · ${esc(session.difficulty)}</div>
         <p>${esc(c.prompt)}</p>
       </div>
       <div class="transcript">${transcriptBubbles}</div>
       <div class="compose">
-        <textarea id="composeInput" placeholder="Type or dictate your response…" ${session.busy?'disabled':''}></textarea>
-        ${micSupported ? `<button type="button" class="speaker-toggle ${micActive?'active mic-live':''}" data-action="toggle-mic" title="Dictate your answer">${micActive?'⏺':'🎤'}</button>` : ''}
+        <textarea id="composeInput" placeholder="${paused?'Paused — hit Resume to keep going…':'Type or dictate your response…'}" ${locked?'disabled':''}></textarea>
+        ${micSupported ? `<button type="button" class="speaker-toggle ${micActive?'active mic-live':''}" data-action="toggle-mic" title="Dictate your answer" ${paused?'disabled':''}>${micActive?'⏺':'🎤'}</button>` : ''}
         ${speechSupported ? `<button type="button" class="speaker-toggle ${ttsEnabled?'active':''}" data-action="toggle-tts" title="Read interviewer lines aloud">🔊</button>` : ''}
-        <button type="button" class="btn btn-primary send-btn" data-action="send" ${session.busy?'disabled':''}>Send</button>
+        <button type="button" class="btn btn-primary send-btn" data-action="send" ${locked?'disabled':''}>Send</button>
       </div>
       <div class="compose-note">
         ${micSupported ? `🎤 dictates your answer into the box — click once to start, again to stop (you can keep editing before you send). ${micActive?'<b>Listening…</b>':''}` : 'Voice dictation isn\'t supported in this browser — try Chrome or Edge.'}
         ${speechSupported ? ` · 🔊 reads the interviewer's replies aloud — currently <b>${ttsEnabled?'on':'off'}</b>.` : ''}
+        · ⏸ pauses the Elapsed clock for a break · Calc times just a calculation, same as Thinking times your structuring — use either, both, or neither.
       </div>`;
   }
 
@@ -1424,7 +1525,7 @@
 
   function evalHtml(){
     const ev = session.evaluation;
-    const totalMs = session.endedAt - session.startedAt;
+    const totalMs = workingMs(session);
     const phaseTimeHtml = PHASES.map((p,i) => `<div class="time-stat"><span class="ts-label">${esc(p)}</span><span class="ts-value mono">${fmtTime(session.phaseElapsed[i])}</span></div>`).join('');
     const transcriptBubbles = session.transcript.map(m => `<div class="bubble ${m.role}"><div class="b-role">${m.role==='candidate'?'You':'Interviewer'}</div>${esc(m.text)}</div>`).join('');
 
@@ -1451,6 +1552,8 @@
         <div class="time-row">
           <div class="time-stat"><span class="ts-label">Total time</span><span class="ts-value mono">${fmtTime(totalMs)}</span></div>
           <div class="time-stat"><span class="ts-label">Thinking time</span><span class="ts-value mono">${fmtTime(session.thinking.totalMs)}</span></div>
+          <div class="time-stat"><span class="ts-label">Calc time</span><span class="ts-value mono">${fmtTime(session.calc.totalMs)}</span></div>
+          ${session.paused.totalMs ? `<div class="time-stat"><span class="ts-label">On break</span><span class="ts-value mono">${fmtTime(session.paused.totalMs)}</span></div>` : ''}
           ${phaseTimeHtml}
         </div>
         ${!dbReady && ev ? '<div class="note" style="margin-top:10px;">Sign-in isn’t available in this view, so this result wasn’t saved to history — it’ll be gone once you leave this page.</div>' : ''}
@@ -1479,6 +1582,7 @@
         <div class="time-row">
           <div class="time-stat"><span class="ts-label">Total time</span><span class="ts-value mono">${fmtTime(h.totalMs||0)}</span></div>
           <div class="time-stat"><span class="ts-label">Thinking time</span><span class="ts-value mono">${fmtTime(h.thinkingMs||0)}</span></div>
+          <div class="time-stat"><span class="ts-label">Calc time</span><span class="ts-value mono">${fmtTime(h.calcMs||0)}</span></div>
           ${phaseTimeHtml}
         </div>
         <details class="transcript-fold" open><summary>Full transcript</summary><div class="transcript">${transcriptBubbles}</div></details>
@@ -1585,6 +1689,10 @@
 
     const thinkBtn = app.querySelector('[data-action="toggle-think"]');
     if(thinkBtn) thinkBtn.addEventListener('click', toggleThinking);
+    const calcBtn = app.querySelector('[data-action="toggle-calc"]');
+    if(calcBtn) calcBtn.addEventListener('click', toggleCalc);
+    const pauseBtn = app.querySelector('[data-action="toggle-pause"]');
+    if(pauseBtn) pauseBtn.addEventListener('click', togglePause);
     const nextPhaseBtn = app.querySelector('[data-action="next-phase"]');
     if(nextPhaseBtn) nextPhaseBtn.addEventListener('click', advancePhase);
     const endBtn = app.querySelector('[data-action="end-session"]');
