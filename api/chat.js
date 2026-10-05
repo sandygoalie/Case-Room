@@ -27,7 +27,9 @@ const MODELS = {
   },
   cerebras: { quick: 'llama-3.3-70b', default: 'llama-3.3-70b', complex: 'llama-3.3-70b' },
   mistral: { quick: 'open-mistral-nemo', default: 'mistral-small-latest', complex: 'mistral-small-latest' },
-  nvidia: { quick: 'meta/llama-3.1-8b-instruct', default: 'meta/llama-3.1-8b-instruct', complex: 'meta/llama-3.1-8b-instruct' },
+  // meta/llama-3.1-8b-instruct (the original pick here) hit end-of-life on
+  // NVIDIA's side and 410s — verified these three are live via /v1/models
+  nvidia: { quick: 'nvidia/llama-3.1-nemotron-51b-instruct', default: 'nvidia/llama-3.1-nemotron-70b-instruct', complex: 'nvidia/llama-3.1-nemotron-ultra-253b-v1' },
 };
 
 // base URL for every provider that speaks the OpenAI chat-completions shape
